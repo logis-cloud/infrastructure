@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  ms-clientes:
+    build: ./svc-clients
+    container_name: ms-clientes
+    restart: unless-stopped
+    env_file:
+      - ./svc-clients/.env
+
+    #esto solo es necesario si usas linux y haces pruebas en local
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8001:8000"
