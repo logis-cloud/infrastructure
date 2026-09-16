@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  ms-clientes:
+  ms-clients:
     build: ./svc-clients
-    container_name: ms-clientes
+    container_name: ms-clients
     restart: unless-stopped
     env_file:
       - ./svc-clients/.env
@@ -13,3 +13,17 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "8001:8000"
+
+  ms-vehicles: 
+    build: ./svc-vehicles
+    container_name: ms-vehicles
+    restart: unless-stopped
+    env_file: 
+      - ./svc-vehicles/.env
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8002:8080"
+
+
