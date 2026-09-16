@@ -112,6 +112,14 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           cd /home/ubuntu
+
+          # La AMI trae MySQL nativo preinstalado, corriendo en el puerto 3306.
+          # Choca directo con el contenedor mysql-clients del compose. Se
+          # deshabilita ANTES de levantar los contenedores para que no vuelva
+          # a arrancar en un reinicio de la VM.
+          systemctl stop mysql || true
+          systemctl disable mysql || true
+
           git clone https://github.com/logis-cloud/vm-db.git
           cd vm-db
           docker compose up -d
