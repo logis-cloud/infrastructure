@@ -4,7 +4,7 @@ Description: "Infraestructura Completa Proyecto Cloud - 4 VMs con IaC"
 Parameters:
   AMI:
     Type: String
-    Default: "ami-0b33d2f1547e52c78"
+    Default: "ami-0f0d6506336355624"
     Description: "AMI con Docker y Ubuntu preconfigurados"
   KeyName:
     Type: String
