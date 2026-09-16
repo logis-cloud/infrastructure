@@ -25,13 +25,15 @@ Resources:
           FromPort: "22"
           ToPort: "22"
           CidrIp: "0.0.0.0/0"
+        # Puertos publicados por cada microservicio segun su propio
+        # docker-compose.yml: 8001 svc-clients, 8002 svc-vehicles.
         - IpProtocol: "tcp"
-          FromPort: "8000"
-          ToPort: "8000"
+          FromPort: "8001"
+          ToPort: "8001"
           CidrIp: "0.0.0.0/0"
         - IpProtocol: "tcp"
-          FromPort: "8080"
-          ToPort: "8080"
+          FromPort: "8002"
+          ToPort: "8002"
           CidrIp: "0.0.0.0/0"
 
   IngestionSecurityGroup:
@@ -49,12 +51,10 @@ Resources:
     Properties:
       GroupDescription: "Acceso Privado a Bases de Datos"
       SecurityGroupIngress:
-        # Permitir SSH desde consola web
         - IpProtocol: "tcp"
           FromPort: "22"
           ToPort: "22"
           CidrIp: "0.0.0.0/0"
-        # Acceso a BDs desde Produccion
         - IpProtocol: "tcp"
           FromPort: "3306"
           ToPort: "3306"
@@ -67,7 +67,6 @@ Resources:
           FromPort: "27017"
           ToPort: "27017"
           SourceSecurityGroupId: !Ref ProdSecurityGroup
-        # Acceso a BDs desde Ingesta (DS)
         - IpProtocol: "tcp"
           FromPort: "3306"
           ToPort: "3306"
@@ -93,7 +92,9 @@ Resources:
         - Key: "Name"
           Value: "VM-BaseDeDatos"
       ImageId: !Ref AMI
-      InstanceType: "t2.micro"
+      # t2.micro (1 GB RAM) no alcanza para correr MySQL + Postgres a la vez,
+      # menos aun cuando se les carga con los scripts de fake data.
+      InstanceType: "t3.small"
       KeyName: !Ref KeyName
       SecurityGroupIds:
         - !Ref DBSecurityGroup
@@ -105,15 +106,20 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           cd /home/ubuntu
-          # Reemplaza esta URL con tu repositorio de bases de datos
           git clone https://github.com/logis-cloud/vm-db.git
-          cd vm-db 
+          cd vm-db
           docker compose up -d
           chown -R ubuntu:ubuntu /home/ubuntu
 
-  # --- VM 2: PRO vm-dbDUCCIÓN 1 ---
+  # --- VM 2: PRODUCCIÓN 1 ---
   VMProd1:
     Type: "AWS::EC2::Instance"
+    # Dependencia explicita: CloudFormation espera a que el RECURSO
+    # VMDatabase termine de crearse antes de lanzar esta VM. No garantiza
+    # que MySQL/Postgres ya esten listos dentro del contenedor (por eso el
+    # paso 1: los microservicios deben tolerar reintentos), pero evita el
+    # peor caso de que ambas VMs arranquen literalmente a la vez.
+    DependsOn: VMDatabase
     Properties:
       Tags:
         - Key: "Name"
@@ -132,21 +138,43 @@ Resources:
           #!/bin/bash
           cd /home/ubuntu
 
-          # Microservicio 1
-          git clone https://github.com/logis-cloud/svc-clients.git 
+          # Repositorio con el docker-compose.yml de nivel superior que
+          # levanta ambos microservicios juntos.
+          git clone https://github.com/logis-cloud/vm-prod.git 
+          cd vm-prod 
 
-          # Microservicio 2
-          git clone https://github.com/logis-cloud/svc-vehicles.git 
+          # Clona cada microservicio como subcarpeta dentro del stack.
+          git clone https://github.com/logis-cloud/svc-clients.git
+          git clone https://github.com/logis-cloud/svc-vehicles.git
 
-          # Levantar el contenedor 
-          docker compose up -d
+          # Genera el .env de cada microservicio con la IP PRIVADA REAL
+          # de la VM de base de datos, resuelta por CloudFormation.
+          cat > svc-clients/.env <<EOF
+          DB_USER=root
+          DB_PASSWORD=root123
+          DB_HOST=${VMDatabase.PrivateIp}
+          DB_PORT=3306
+          DB_NAME=clients_db
+          CORS_ALLOWED_ORIGINS=*
+          EOF
 
-          # Ajustar permisos para el usuario ubuntu
+          cat > svc-vehicles/.env <<EOF
+          DB_HOST=${VMDatabase.PrivateIp}
+          DB_PORT=5432
+          DB_NAME=vehicles_db
+          DB_USER=postgres
+          DB_PASSWORD=postgres123
+          CORS_ALLOWED_ORIGINS=*
+          EOF
+
+          docker compose up -d --build
+
           chown -R ubuntu:ubuntu /home/ubuntu
 
   # --- VM 3: PRODUCCIÓN 2 ---
   VMProd2:
     Type: "AWS::EC2::Instance"
+    DependsOn: VMDatabase
     Properties:
       Tags:
         - Key: "Name"
@@ -165,16 +193,32 @@ Resources:
           #!/bin/bash
           cd /home/ubuntu
 
-          # Microservicio 1
-          git clone https://github.com/logis-cloud/svc-clients.git 
+          git clone https://github.com/logis-cloud/vm-prod.git 
+          cd vm-prod 
 
-          # Microservicio 2
-          git clone https://github.com/logis-cloud/svc-vehicles.git 
+          git clone https://github.com/logis-cloud/svc-clients.git
+          git clone https://github.com/logis-cloud/svc-vehicles.git
 
-          # Levantar el contenedor
-          docker compose up -d
+          cat > svc-clients/.env <<EOF
+          DB_USER=root
+          DB_PASSWORD=root123
+          DB_HOST=${VMDatabase.PrivateIp}
+          DB_PORT=3306
+          DB_NAME=clients_db
+          CORS_ALLOWED_ORIGINS=*
+          EOF
 
-          # Ajustar permisos para el usuario ubuntu
+          cat > svc-vehicles/.env <<EOF
+          DB_HOST=${VMDatabase.PrivateIp}
+          DB_PORT=5432
+          DB_NAME=vehicles_db
+          DB_USER=postgres
+          DB_PASSWORD=postgres123
+          CORS_ALLOWED_ORIGINS=*
+          EOF
+
+          docker compose up -d --build
+
           chown -R ubuntu:ubuntu /home/ubuntu
 
   # --- VM 4: INGESTA (Data Science) ---
@@ -197,7 +241,6 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           cd /home/ubuntu
-          # Si ya tienes repo para ingesta, ponlo aqui. Si no, déjalo preparado.
           # git clone https://github.com/tu-usuario/repo-ingesta.git
           chown -R ubuntu:ubuntu /home/ubuntu
 
@@ -215,11 +258,11 @@ Resources:
       InstanceId: !Ref VMProd2
 
 # =========================================================
-# 4. OUTPUTS (IPs para configurar tus .env)
+# 4. OUTPUTS
 # =========================================================
 Outputs:
   IPPrivadaVMBaseDeDatos:
-    Description: "IP Privada de la VM de BD (Poner esta IP en los .env de las APIs)"
+    Description: "IP Privada de la VM de BD (ya se inyecta sola en los .env via UserData)"
     Value: !GetAtt VMDatabase.PrivateIp
 
   IPPublicaVMProd1:
