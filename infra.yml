@@ -4,12 +4,15 @@ Description: "Infraestructura Completa Proyecto Cloud - 4 VMs con IaC"
 Parameters:
   AMI:
     Type: String
-    Default: "ami-0f0d6506336355624"
+    Default: "ami-0b33d2f1547e52c78"
     Description: "AMI con Docker y Ubuntu preconfigurados"
   KeyName:
     Type: String
     Default: "vockey"
     Description: "Clave SSH de AWS"
+  VpcId:
+    Type: "AWS::EC2::VPC::Id"
+    Description: "VPC donde se crean los Security Groups (selecciona la VPC por defecto de tu cuenta/Learner Lab)"
 
 Resources:
   # =========================================================
@@ -20,6 +23,7 @@ Resources:
     Type: "AWS::EC2::SecurityGroup"
     Properties:
       GroupDescription: "Acceso publico para APIs (Prod) y SSH"
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: "tcp"
           FromPort: "22"
@@ -40,6 +44,7 @@ Resources:
     Type: "AWS::EC2::SecurityGroup"
     Properties:
       GroupDescription: "Acceso SSH para VM de Ingesta"
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: "tcp"
           FromPort: "22"
@@ -50,6 +55,7 @@ Resources:
     Type: "AWS::EC2::SecurityGroup"
     Properties:
       GroupDescription: "Acceso Privado a Bases de Datos"
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: "tcp"
           FromPort: "22"
@@ -140,8 +146,8 @@ Resources:
 
           # Repositorio con el docker-compose.yml de nivel superior que
           # levanta ambos microservicios juntos.
-          git clone https://github.com/logis-cloud/vm-prod.git 
-          cd vm-prod 
+          git clone https://github.com/logis-cloud/prod-stack.git
+          cd prod-stack
 
           # Clona cada microservicio como subcarpeta dentro del stack.
           git clone https://github.com/logis-cloud/svc-clients.git
@@ -193,8 +199,8 @@ Resources:
           #!/bin/bash
           cd /home/ubuntu
 
-          git clone https://github.com/logis-cloud/vm-prod.git 
-          cd vm-prod 
+          git clone https://github.com/logis-cloud/prod-stack.git
+          cd prod-stack
 
           git clone https://github.com/logis-cloud/svc-clients.git
           git clone https://github.com/logis-cloud/svc-vehicles.git
