@@ -164,8 +164,8 @@ Resources:
 
           # Repositorio con el docker-compose.yml de nivel superior que
           # levanta ambos microservicios juntos.
-          git clone https://github.com/logis-cloud/prod-stack.git
-          cd prod-stack
+          git clone https://github.com/logis-cloud/vm-prod.git 
+          cd vm-prod 
 
           # Clona cada microservicio como subcarpeta dentro del stack.
           git clone https://github.com/logis-cloud/svc-clients.git
@@ -217,8 +217,8 @@ Resources:
           #!/bin/bash
           cd /home/ubuntu
 
-          git clone https://github.com/logis-cloud/prod-stack.git
-          cd prod-stack
+          git clone https://github.com/logis-cloud/vm-prod.git 
+          cd vm-prod 
 
           git clone https://github.com/logis-cloud/svc-clients.git
           git clone https://github.com/logis-cloud/svc-vehicles.git
