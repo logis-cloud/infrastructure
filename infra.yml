@@ -123,6 +123,16 @@ Resources:
           git clone https://github.com/logis-cloud/vm-db.git
           cd vm-db
           docker compose up -d
+
+          # Dependencias para correr manualmente los scripts de fake data
+          # (clients/fake_mysql.py, vehicles/fake_postgres.py). Se instalan
+          # aca, pero los scripts NO se ejecutan automaticamente: hay que
+          # esperar a que las tablas existan (init de MySQL/Postgres) y
+          # correrlos a mano una sola vez.
+          apt-get update -y
+          apt-get install -y python3-pip
+          pip3 install pymysql psycopg2-binary faker
+
           chown -R ubuntu:ubuntu /home/ubuntu
 
   # --- VM 2: PRODUCCIÓN 1 ---
