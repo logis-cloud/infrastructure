@@ -23,14 +23,15 @@ Resources:
     Type: "AWS::EC2::SecurityGroup"
     Properties:
       GroupDescription: "Acceso publico para APIs (Prod) y SSH"
-      VpcId: !Ref VpcI3d
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: "tcp"
           FromPort: "22"
           ToPort: "22"
           CidrIp: "0.0.0.0/0"
         # Puertos publicados por cada microservicio segun su propio
-        # docker-compose.yml: 8001 svc-clients, 8002 svc-vehicles, 8003 svc-shipments
+        # docker-compose.yml: 8001 svc-clients, 8002 svc-vehicles,
+        # 8003 svc-shipments.
         - IpProtocol: "tcp"
           FromPort: "8001"
           ToPort: "8001"
@@ -102,8 +103,8 @@ Resources:
         - Key: "Name"
           Value: "VM-BaseDeDatos"
       ImageId: !Ref AMI
-      # t2.micro (1 GB RAM) no alcanza para correr MySQL + Postgres a la vez,
-      # menos aun cuando se les carga con los scripts de fake data.
+      # t2.micro (1 GB RAM) no alcanza para correr MySQL + Postgres + Mongo
+      # a la vez, menos aun cuando se les carga con los scripts de fake data.
       InstanceType: "t3.small"
       KeyName: !Ref KeyName
       SecurityGroupIds:
@@ -144,9 +145,9 @@ Resources:
     Type: "AWS::EC2::Instance"
     # Dependencia explicita: CloudFormation espera a que el RECURSO
     # VMDatabase termine de crearse antes de lanzar esta VM. No garantiza
-    # que MySQL/Postgres ya esten listos dentro del contenedor (por eso el
-    # paso 1: los microservicios deben tolerar reintentos), pero evita el
-    # peor caso de que ambas VMs arranquen literalmente a la vez.
+    # que MySQL/Postgres/Mongo ya esten listos dentro del contenedor (por
+    # eso los microservicios deben tolerar reintentos), pero evita el peor
+    # caso de que ambas VMs arranquen literalmente a la vez.
     DependsOn: VMDatabase
     Properties:
       Tags:
@@ -167,7 +168,7 @@ Resources:
           cd /home/ubuntu
 
           # Repositorio con el docker-compose.yml de nivel superior que
-          # levanta ambos microservicios juntos.
+          # levanta los 3 microservicios juntos.
           git clone https://github.com/logis-cloud/vm-prod.git 
           cd vm-prod 
 
@@ -261,12 +262,6 @@ Resources:
           CORS_ALLOWED_ORIGINS=*
           EOF
 
-          # svc-shipments no arma la conexion por piezas sueltas (Mongoose
-          # recibe una URI ya completa, no host/port/user separados como
-          # SQLAlchemy/JPA). CLIENTES_SERVICE_URL/VEHICULOS_SERVICE_URL
-          # apuntan a localhost porque los 3 microservicios corren en ESTA
-          # MISMA VM, cada uno en su propio docker compose, publicando sus
-          # puertos al host (8001/8002/8003).
           cat > svc-shipments/.env <<EOF
           PORT=3000
           MONGODB_URI=mongodb://root:root123@${VMDatabase.PrivateIp}:27017/envios_db?authSource=admin
