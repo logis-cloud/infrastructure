@@ -1,11 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Infraestructura Completa Proyecto Cloud - 4 VMs con IaC"
+Description: "Infraestructura Completa Proyecto Cloud - 4 VMs con IaC + Glue/Athena para svc-analytics"
 
 Parameters:
   IngestaInstanceProfile:
     Type: String
     Default: "LabInstanceProfile"
-    Description: "Instance profile del Learner Lab; permite a VMIngesta escribir a S3 sin credenciales manuales"
+    Description: "Instance profile del Learner Lab; permite a VMIngesta y VMProd escribir/leer S3 y Athena sin credenciales manuales"
   AMI:
     Type: String
     Default: "ami-0b33d2f1547e52c78"
@@ -35,7 +35,7 @@ Resources:
           CidrIp: "0.0.0.0/0"
         # Puertos publicados por cada microservicio segun su propio
         # docker-compose.yml: 8001 svc-clients, 8002 svc-vehicles,
-        # 8003 svc-shipments.
+        # 8003 svc-shipments, 8004 svc-tracking, 8005 svc-analytics.
         - IpProtocol: "tcp"
           FromPort: "8001"
           ToPort: "8001"
@@ -51,6 +51,10 @@ Resources:
         - IpProtocol: "tcp"
           FromPort: "8004"
           ToPort: "8004"
+          CidrIp: "0.0.0.0/0"
+        - IpProtocol: "tcp"
+          FromPort: "8005"
+          ToPort: "8005"
           CidrIp: "0.0.0.0/0"
 
   IngestionSecurityGroup:
@@ -159,7 +163,7 @@ Resources:
       ImageId: !Ref AMI
       InstanceType: "t2.micro"
       KeyName: !Ref KeyName
-      IamInstanceProfile: !Ref IngestaInstanceProfile   # ← nueva línea
+      IamInstanceProfile: !Ref IngestaInstanceProfile
       SecurityGroupIds:
         - !Ref ProdSecurityGroup
       BlockDeviceMappings:
@@ -172,7 +176,7 @@ Resources:
           cd /home/ubuntu
 
           # Repositorio con el docker-compose.yml de nivel superior que
-          # levanta los 3 microservicios juntos.
+          # levanta los microservicios juntos.
           git clone https://github.com/logis-cloud/vm-prod.git 
           cd vm-prod 
 
@@ -232,7 +236,7 @@ Resources:
       ImageId: !Ref AMI
       InstanceType: "t2.micro"
       KeyName: !Ref KeyName
-      IamInstanceProfile: !Ref IngestaInstanceProfile   # ← nueva línea
+      IamInstanceProfile: !Ref IngestaInstanceProfile
       SecurityGroupIds:
         - !Ref ProdSecurityGroup
       BlockDeviceMappings:
@@ -366,8 +370,89 @@ Resources:
 
           chown -R ubuntu:ubuntu /home/ubuntu
 
+  # =========================================================
+  # 3. GLUE + ATHENA (para svc-analytics)
+  # =========================================================
+  # Database compartido: los 3 buckets (logis-clientes, logis-vehiculos,
+  # logis-envios) catalogan sus tablas acá, no cada uno en su propio
+  # database, para que los JOINs entre ellos funcionen en Athena
+  # (ej. envios JOIN clientes ON clienteid = id).
+  GlueDatabase:
+    Type: "AWS::Glue::Database"
+    Properties:
+      CatalogId: !Ref "AWS::AccountId"
+      DatabaseInput:
+        Name: "logis_analytics"
+        Description: "Catálogo unificado (clientes, vehiculos, envios) para Athena"
+
+  # Los 3 Crawlers usan LabRole por ARN (mismo role detrás de
+  # LabInstanceProfile) porque en Learner Lab no se pueden crear roles
+  # IAM nuevos. Apuntan cada uno al prefijo EXACTO donde la ingesta deja
+  # los CSVs (ingesta/<db_name>/), no a la raíz del bucket — apuntar a la
+  # raíz es la causa más común de que el Crawler "corra bien" pero no
+  # encuentre datos.
+  CrawlerClientes:
+    Type: "AWS::Glue::Crawler"
+    Properties:
+      Name: "crawler-logis-clientes"
+      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/LabRole"
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: "s3://logis-clientes/ingesta/clients_db/"
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "LOG"
+
+  CrawlerVehiculos:
+    Type: "AWS::Glue::Crawler"
+    Properties:
+      Name: "crawler-logis-vehiculos"
+      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/LabRole"
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: "s3://logis-vehiculos/ingesta/vehicles_db/"
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "LOG"
+
+  CrawlerEnvios:
+    Type: "AWS::Glue::Crawler"
+    Properties:
+      Name: "crawler-logis-envios"
+      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/LabRole"
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: "s3://logis-envios/ingesta/shipments_db/"
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "LOG"
+
+  # Bucket de resultados de Athena. Nombre con AccountId para que sea
+  # único a nivel global (choca si dos alumnos usan el mismo nombre corto).
+  AthenaResultsBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub "logis-athena-results-${AWS::AccountId}"
+
+  # EnforceWorkGroupConfiguration=true fuerza a que cualquier query
+  # (consola o svc-analytics vía boto3) use este OutputLocation, sin que
+  # cada llamada tenga que especificarlo.
+  AthenaWorkgroup:
+    Type: "AWS::Athena::WorkGroup"
+    Properties:
+      Name: "logis-analytics-wg"
+      State: "ENABLED"
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://logis-athena-results-${AWS::AccountId}/results/"
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: false
+
 # =========================================================
-# 3. IPS ELÁSTICAS (Para Producción)
+# 4. IPS ELÁSTICAS (Para Producción)
 # =========================================================
   EIPProd1:
     Type: "AWS::EC2::EIP"
@@ -380,7 +465,7 @@ Resources:
       InstanceId: !Ref VMProd2
 
 # =========================================================
-# 4. OUTPUTS
+# 5. OUTPUTS
 # =========================================================
 Outputs:
   IPPrivadaVMBaseDeDatos:
@@ -394,3 +479,15 @@ Outputs:
   IPPublicaVMProd2:
     Description: "IP Publica Elastica para Produccion 2"
     Value: !Ref EIPProd2
+
+  GlueDatabaseName:
+    Description: "Nombre del Glue Database para Athena (usar en svc-analytics)"
+    Value: !Ref GlueDatabase
+
+  AthenaWorkgroupName:
+    Description: "Workgroup a usar desde svc-analytics (boto3 athena client)"
+    Value: !Ref AthenaWorkgroup
+
+  AthenaResultsBucketName:
+    Description: "Bucket donde Athena escribe los resultados de las queries"
+    Value: !Ref AthenaResultsBucket
