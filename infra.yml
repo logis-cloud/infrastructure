@@ -327,7 +327,7 @@ Resources:
           DB_USER=root
           DB_PASSWORD=root123
           DB_NAME=clients_db
-          S3_BUCKET_NAME=logis-cloud-2026-2
+          S3_BUCKET_NAME=logis-clientes
           AWS_REGION=us-east-1
           INTERVALO_INGESTA=60
           RETRY_INGESTA=10
@@ -339,7 +339,7 @@ Resources:
           DB_USER=postgres
           DB_PASSWORD=postgres123
           DB_NAME=vehicles_db
-          S3_BUCKET_NAME=logis-cloud-2026-2
+          S3_BUCKET_NAME=logis-vehiculos
           AWS_REGION=us-east-1
           INTERVALO_INGESTA=60
           RETRY_INGESTA=10
@@ -348,7 +348,7 @@ Resources:
           cat > ingesta-envios/.env <<EOF
           MONGO_URI=mongodb://root:root123@${VMDatabase.PrivateIp}:27017/shipments_db?authSource=admin
           DB_NAME=shipments_db
-          S3_BUCKET_NAME=logis-cloud-2026-2
+          S3_BUCKET_NAME=logis-envios
           AWS_REGION=us-east-1
           INTERVALO_INGESTA=60
           RETRY_INGESTA=10
