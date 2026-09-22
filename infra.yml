@@ -151,11 +151,6 @@ Resources:
   # --- VM 2: PRODUCCIÓN 1 ---
   VMProd1:
     Type: "AWS::EC2::Instance"
-    # Dependencia explicita: CloudFormation espera a que el RECURSO
-    # VMDatabase termine de crearse antes de lanzar esta VM. No garantiza
-    # que MySQL/Postgres/Mongo ya esten listos dentro del contenedor (por
-    # eso los microservicios deben tolerar reintentos), pero evita el peor
-    # caso de que ambas VMs arranquen literalmente a la vez.
     DependsOn: VMDatabase
     Properties:
       Tags:
@@ -164,6 +159,7 @@ Resources:
       ImageId: !Ref AMI
       InstanceType: "t2.micro"
       KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref IngestaInstanceProfile   # ← nueva línea
       SecurityGroupIds:
         - !Ref ProdSecurityGroup
       BlockDeviceMappings:
@@ -236,6 +232,7 @@ Resources:
       ImageId: !Ref AMI
       InstanceType: "t2.micro"
       KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref IngestaInstanceProfile   # ← nueva línea
       SecurityGroupIds:
         - !Ref ProdSecurityGroup
       BlockDeviceMappings:
