@@ -2,6 +2,10 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: "Infraestructura Completa Proyecto Cloud - 4 VMs con IaC"
 
 Parameters:
+  IngestaInstanceProfile:
+    Type: String
+    Default: "LabInstanceProfile"
+    Description: "Instance profile del Learner Lab; permite a VMIngesta escribir a S3 sin credenciales manuales"
   AMI:
     Type: String
     Default: "ami-0b33d2f1547e52c78"
@@ -290,6 +294,7 @@ Resources:
   # --- VM 4: INGESTA (Data Science) ---
   VMIngesta:
     Type: "AWS::EC2::Instance"
+    DependsOn: VMDatabase
     Properties:
       Tags:
         - Key: "Name"
@@ -297,6 +302,7 @@ Resources:
       ImageId: !Ref AMI
       InstanceType: "t2.micro"
       KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref IngestaInstanceProfile
       SecurityGroupIds:
         - !Ref IngestionSecurityGroup
       BlockDeviceMappings:
@@ -307,21 +313,74 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           cd /home/ubuntu
-          # git clone https://github.com/tu-usuario/repo-ingesta.git
+
+          # VM de Ingesta: no corre bases de datos, solo lee por IP privada
+          # desde VMDatabase y escribe a S3. Las credenciales de S3 vienen
+          # del instance profile (IamInstanceProfile arriba), no de un
+          # archivo de credenciales manual.
+          git clone https://github.com/logis-cloud/vm-ingesta.git
+          cd vm-ingesta
+
+          cat > ingesta-clientes/.env <<EOF
+          DB_HOST=${VMDatabase.PrivateIp}
+          DB_PORT=3306
+          DB_USER=root
+          DB_PASSWORD=root123
+          DB_NAME=clients_db
+          S3_BUCKET_NAME=logis-cloud-2026-2
+          AWS_REGION=us-east-1
+          INTERVALO_INGESTA=60
+          RETRY_INGESTA=10
+          EOF
+
+          cat > ingesta-vehiculos/.env <<EOF
+          DB_HOST=${VMDatabase.PrivateIp}
+          DB_PORT=5432
+          DB_USER=postgres
+          DB_PASSWORD=postgres123
+          DB_NAME=vehicles_db
+          S3_BUCKET_NAME=logis-cloud-2026-2
+          AWS_REGION=us-east-1
+          INTERVALO_INGESTA=60
+          RETRY_INGESTA=10
+          EOF
+
+          cat > ingesta-envios/.env <<EOF
+          MONGO_URI=mongodb://root:root123@${VMDatabase.PrivateIp}:27017/shipments_db?authSource=admin
+          DB_NAME=shipments_db
+          S3_BUCKET_NAME=logis-cloud-2026-2
+          AWS_REGION=us-east-1
+          INTERVALO_INGESTA=60
+          RETRY_INGESTA=10
+          EOF
+
+          # --- Fallback manual: solo si LabInstanceProfile no existe con ---
+          # --- ese nombre en tu cuenta. Descomenta y reemplaza los 3     ---
+          # --- placeholders con las credenciales temporales del Lab.    ---
+          # mkdir -p /home/ubuntu/.aws
+          # cat > /home/ubuntu/.aws/credentials <<EOF
+          # [default]
+          # aws_access_key_id=PLACEHOLDER_ACCESS_KEY_ID
+          # aws_secret_access_key=PLACEHOLDER_SECRET_ACCESS_KEY
+          # aws_session_token=PLACEHOLDER_SESSION_TOKEN
+          # EOF
+
+          docker compose up -d --build
+
           chown -R ubuntu:ubuntu /home/ubuntu
 
-  # =========================================================
-  # 3. IPS ELÁSTICAS (Para Producción)
-  # =========================================================
-  EIPProd1:
-    Type: "AWS::EC2::EIP"
-    Properties:
-      InstanceId: !Ref VMProd1
+# =========================================================
+# 3. IPS ELÁSTICAS (Para Producción)
+# =========================================================
+EIPProd1:
+  Type: "AWS::EC2::EIP"
+  Properties:
+    InstanceId: !Ref VMProd1
 
-  EIPProd2:
-    Type: "AWS::EC2::EIP"
-    Properties:
-      InstanceId: !Ref VMProd2
+EIPProd2:
+  Type: "AWS::EC2::EIP"
+  Properties:
+    InstanceId: !Ref VMProd2
 
 # =========================================================
 # 4. OUTPUTS
