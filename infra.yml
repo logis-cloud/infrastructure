@@ -369,9 +369,9 @@ Resources:
 
           chown -R ubuntu:ubuntu /home/ubuntu
 
-  # =========================================================
-  # 3. IPS ELÁSTICAS (Para Producción)
-  # =========================================================
+# =========================================================
+# 3. IPS ELÁSTICAS (Para Producción)
+# =========================================================
   EIPProd1:
     Type: "AWS::EC2::EIP"
     Properties:
@@ -382,18 +382,18 @@ Resources:
     Properties:
       InstanceId: !Ref VMProd2
 
-  # =========================================================
-  # 4. OUTPUTS
-  # =========================================================
-  Outputs:
-    IPPrivadaVMBaseDeDatos:
-      Description: "IP Privada de la VM de BD (ya se inyecta sola en los .env via UserData)"
-      Value: !GetAtt VMDatabase.PrivateIp
+# =========================================================
+# 4. OUTPUTS
+# =========================================================
+Outputs:
+  IPPrivadaVMBaseDeDatos:
+    Description: "IP Privada de la VM de BD (ya se inyecta sola en los .env via UserData)"
+    Value: !GetAtt VMDatabase.PrivateIp
 
-    IPPublicaVMProd1:
-      Description: "IP Publica Elastica para Produccion 1"
-      Value: !Ref EIPProd1
+  IPPublicaVMProd1:
+    Description: "IP Publica Elastica para Produccion 1"
+    Value: !Ref EIPProd1
 
-    IPPublicaVMProd2:
-      Description: "IP Publica Elastica para Produccion 2"
-      Value: !Ref EIPProd2
+  IPPublicaVMProd2:
+    Description: "IP Publica Elastica para Produccion 2"
+    Value: !Ref EIPProd2
