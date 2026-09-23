@@ -17,45 +17,72 @@ Parameters:
   VpcId:
     Type: "AWS::EC2::VPC::Id"
     Description: "VPC donde se crean los Security Groups (selecciona la VPC por defecto de tu cuenta/Learner Lab)"
+  Prod1SubnetId:
+    Type: "AWS::EC2::Subnet::Id"
+    Default: "subnet-0cc09d979bb259e78"
+    Description: "Subnet de VMProd1 (us-east-1c)"
+
+  Prod2SubnetId:
+    Type: "AWS::EC2::Subnet::Id"
+    Default: "subnet-0dbb6c9a39936a6ba"
+    Description: "Subnet de VMProd2 (us-east-1a)"
+
+  ALBSubnet1Id:
+    Type: "AWS::EC2::Subnet::Id"
+    Default: "subnet-0cc09d979bb259e78"
+    Description: "Subnet 1 del ALB (us-east-1c)"
+
+  ALBSubnet2Id:
+    Type: "AWS::EC2::Subnet::Id"
+    Default: "subnet-0dbb6c9a39936a6ba"
+    Description: "Subnet 2 del ALB (us-east-1a)"
 
 Resources:
   # =========================================================
   # 1. SECURITY GROUPS (REGLAS DE FIREWALL)
   # =========================================================
 
+  ALBSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Acceso al ALB desde la VPC"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: "0.0.0.0/0"
+
   ProdSecurityGroup:
     Type: "AWS::EC2::SecurityGroup"
     Properties:
-      GroupDescription: "Acceso publico para APIs (Prod) y SSH"
+      GroupDescription: "Acceso a APIs de produccion desde el ALB y SSH"
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: "tcp"
           FromPort: "22"
           ToPort: "22"
           CidrIp: "0.0.0.0/0"
-        # Puertos publicados por cada microservicio segun su propio
-        # docker-compose.yml: 8001 svc-clients, 8002 svc-vehicles,
-        # 8003 svc-shipments, 8004 svc-tracking, 8005 svc-analytics.
         - IpProtocol: "tcp"
           FromPort: "8001"
           ToPort: "8001"
-          CidrIp: "0.0.0.0/0"
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
         - IpProtocol: "tcp"
           FromPort: "8002"
           ToPort: "8002"
-          CidrIp: "0.0.0.0/0"
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
         - IpProtocol: "tcp"
           FromPort: "8003"
           ToPort: "8003"
-          CidrIp: "0.0.0.0/0"
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
         - IpProtocol: "tcp"
           FromPort: "8004"
           ToPort: "8004"
-          CidrIp: "0.0.0.0/0"
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
         - IpProtocol: "tcp"
           FromPort: "8005"
           ToPort: "8005"
-          CidrIp: "0.0.0.0/0"
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
 
   IngestionSecurityGroup:
     Type: "AWS::EC2::SecurityGroup"
@@ -163,6 +190,7 @@ Resources:
       ImageId: !Ref AMI
       InstanceType: "t2.micro"
       KeyName: !Ref KeyName
+      SubnetId: !Ref Prod1SubnetId
       IamInstanceProfile: !Ref IngestaInstanceProfile
       SecurityGroupIds:
         - !Ref ProdSecurityGroup
@@ -244,6 +272,7 @@ Resources:
       ImageId: !Ref AMI
       InstanceType: "t2.micro"
       KeyName: !Ref KeyName
+      SubnetId: !Ref Prod2SubnetId
       IamInstanceProfile: !Ref IngestaInstanceProfile
       SecurityGroupIds:
         - !Ref ProdSecurityGroup
@@ -387,7 +416,193 @@ Resources:
           chown -R ubuntu:ubuntu /home/ubuntu
 
   # =========================================================
-  # 3. GLUE + ATHENA (para svc-analytics)
+  # 3. APPLICATION LOAD BALANCER
+  # =========================================================
+  ProductionALB:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Name: "logis-production-alb"
+      Scheme: "internal"
+      Type: "application"
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !Ref ALBSubnet1Id
+        - !Ref ALBSubnet2Id
+      Tags:
+        - Key: "Name"
+          Value: "logis-production-alb"
+
+  ClientsTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Name: "tg-clients"
+      Port: 8001
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !Ref VpcId
+      HealthCheckPath: "/"
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+      Targets:
+        - Id: !Ref VMProd1
+          Port: 8001
+        - Id: !Ref VMProd2
+          Port: 8001
+
+  VehiclesTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Name: "tg-vehicles"
+      Port: 8002
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !Ref VpcId
+      HealthCheckPath: "/health"
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+      Targets:
+        - Id: !Ref VMProd1
+          Port: 8002
+        - Id: !Ref VMProd2
+          Port: 8002
+
+  ShipmentsTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Name: "tg-shipments"
+      Port: 8003
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !Ref VpcId
+      HealthCheckPath: "/health"
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+      Targets:
+        - Id: !Ref VMProd1
+          Port: 8003
+        - Id: !Ref VMProd2
+          Port: 8003
+
+  TrackingTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Name: "tg-tracking"
+      Port: 8004
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !Ref VpcId
+      HealthCheckPath: "/"
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+      Targets:
+        - Id: !Ref VMProd1
+          Port: 8004
+        - Id: !Ref VMProd2
+          Port: 8004
+
+  AnalyticsTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Name: "tg-analytics"
+      Port: 8005
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !Ref VpcId
+      HealthCheckPath: "/health"
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+      Targets:
+        - Id: !Ref VMProd1
+          Port: 8005
+        - Id: !Ref VMProd2
+          Port: 8005
+
+  ProductionALBListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      LoadBalancerArn: !Ref ProductionALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "404"
+            ContentType: "text/plain"
+            MessageBody: "Ruta no encontrada"
+
+  ClientsALBRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      ListenerArn: !Ref ProductionALBListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ["/", "/clientes", "/clientes/*", "/direcciones/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ClientsTargetGroup
+
+  VehiclesALBRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      ListenerArn: !Ref ProductionALBListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ["/vehiculos", "/vehiculos/*", "/conductores", "/conductores/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref VehiclesTargetGroup
+
+  ShipmentsALBRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      ListenerArn: !Ref ProductionALBListener
+      Priority: 30
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ["/envios", "/envios/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ShipmentsTargetGroup
+
+  TrackingALBRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      ListenerArn: !Ref ProductionALBListener
+      Priority: 40
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ["/trackings", "/trackings/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TrackingTargetGroup
+
+  AnalyticsALBRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      ListenerArn: !Ref ProductionALBListener
+      Priority: 50
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ["/analitica", "/analitica/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref AnalyticsTargetGroup
+
+  # =========================================================
+  # 4. GLUE + ATHENA (para svc-analytics)
   # =========================================================
   # Database compartido: los 3 buckets (logis-clientes, logis-vehiculos,
   # logis-envios) catalogan sus tablas acá, no cada uno en su propio
@@ -468,7 +683,7 @@ Resources:
         PublishCloudWatchMetricsEnabled: false
 
 # =========================================================
-# 4. IPS ELÁSTICAS (Para Producción)
+# 5. IPS ELÁSTICAS (Para Producción)
 # =========================================================
   EIPProd1:
     Type: "AWS::EC2::EIP"
@@ -481,7 +696,7 @@ Resources:
       InstanceId: !Ref VMProd2
 
 # =========================================================
-# 5. OUTPUTS
+# 6. OUTPUTS
 # =========================================================
 Outputs:
   IPPrivadaVMBaseDeDatos:
@@ -507,3 +722,8 @@ Outputs:
   AthenaResultsBucketName:
     Description: "Bucket donde Athena escribe los resultados de las queries"
     Value: !Ref AthenaResultsBucket
+
+  ProductionALBDnsName:
+    Description: "DNS interno del ALB de produccion"
+    Value: !GetAtt ProductionALB.DNSName
+
