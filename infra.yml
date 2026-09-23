@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Infraestructura Completa Proyecto Cloud - 4 VMs con IaC + Glue/Athena para svc-analytics"
+Description: "Infraestructura Completa Proyecto Cloud - 4 VMs con IaC + API Gateway + Glue/Athena para svc-analytics"
 
 Parameters:
   IngestaInstanceProfile:
@@ -129,6 +129,32 @@ Resources:
           FromPort: "27017"
           ToPort: "27017"
           SourceSecurityGroupId: !Ref IngestionSecurityGroup
+
+  # Security group dedicado a las ENIs que crea el VPC Link de API Gateway.
+  # Necesita poder llegar al ALB por el puerto 80; no necesita ingress propio
+  # (nadie se conecta directo a estas ENIs), solo egress hacia el ALB.
+  VpcLinkSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "SG para las ENIs del VPC Link de API Gateway (HTTP API -> ALB privado)"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "tcp"
+          FromPort: "80"
+          ToPort: "80"
+          DestinationSecurityGroupId: !Ref ALBSecurityGroup
+
+  # El ALB es "internal" (scheme privado), así que además de aceptar 80 desde
+  # 0.0.0.0/0 (regla ya existente en ALBSecurityGroup, útil solo dentro de la
+  # VPC) hace falta permitir explícitamente el tráfico que sale del VPC Link.
+  ALBIngressFromVpcLink:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !Ref ALBSecurityGroup
+      IpProtocol: "tcp"
+      FromPort: "80"
+      ToPort: "80"
+      SourceSecurityGroupId: !Ref VpcLinkSecurityGroup
 
   # =========================================================
   # 2. MÁQUINAS VIRTUALES (INSTANCIAS EC2)
@@ -608,7 +634,67 @@ Resources:
           TargetGroupArn: !Ref AnalyticsTargetGroup
 
   # =========================================================
-  # 4. GLUE + ATHENA (para svc-analytics)
+  # 4. API GATEWAY (HTTP API) + VPC LINK
+  # =========================================================
+  # Réplica en IaC de lo que se configuró a mano en la consola:
+  # Internet -> API Gateway (ANY /{proxy+}) -> VPC Link -> ALB privado :80
+  # -> ListenerRules -> Target Groups -> microservicios.
+
+  ProductionApi:
+    Type: "AWS::ApiGatewayV2::Api"
+    Properties:
+      Name: "logis-api"
+      ProtocolType: HTTP
+      Description: "Punto de entrada público único hacia el ALB interno de los microservicios"
+
+  ProductionVpcLink:
+    Type: "AWS::ApiGatewayV2::VpcLink"
+    Properties:
+      Name: "logis-vpc-link"
+      SecurityGroupIds:
+        - !Ref VpcLinkSecurityGroup
+      SubnetIds:
+        - !Ref ALBSubnet1Id
+        - !Ref ALBSubnet2Id
+
+  ProductionApiIntegration:
+    Type: "AWS::ApiGatewayV2::Integration"
+    Properties:
+      ApiId: !Ref ProductionApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      ConnectionType: VPC_LINK
+      ConnectionId: !Ref ProductionVpcLink
+      IntegrationUri: !Ref ProductionALBListener
+      PayloadFormatVersion: "1.0"
+
+  # Ruta greedy: {proxy+} captura el path completo (uno o más segmentos),
+  # necesario para que /clientes/1, /clientes/1/direcciones/2, etc. lleguen
+  # intactos hasta el ALB. Sin el "+" solo se captura un segmento.
+  ProductionApiRoute:
+    Type: "AWS::ApiGatewayV2::Route"
+    Properties:
+      ApiId: !Ref ProductionApi
+      RouteKey: "ANY /{proxy+}"
+      Target: !Sub "integrations/${ProductionApiIntegration}"
+
+  # Ruta explícita para la raíz ("/"), ya que {proxy+} no matchea "/" solo.
+  ProductionApiRootRoute:
+    Type: "AWS::ApiGatewayV2::Route"
+    Properties:
+      ApiId: !Ref ProductionApi
+      RouteKey: "ANY /"
+      Target: !Sub "integrations/${ProductionApiIntegration}"
+
+  ProductionApiStage:
+    Type: "AWS::ApiGatewayV2::Stage"
+    Properties:
+      ApiId: !Ref ProductionApi
+      StageName: "$default"
+      AutoDeploy: true
+
+  # =========================================================
+  # 5. GLUE + ATHENA (para svc-analytics)
   # =========================================================
   # Database compartido: los 3 buckets (logis-clientes, logis-vehiculos,
   # logis-envios) catalogan sus tablas acá, no cada uno en su propio
@@ -689,7 +775,7 @@ Resources:
         PublishCloudWatchMetricsEnabled: false
 
 # =========================================================
-# 5. IPS ELÁSTICAS (Para Producción)
+# 6. IPS ELÁSTICAS (Para Producción)
 # =========================================================
   EIPProd1:
     Type: "AWS::EC2::EIP"
@@ -702,7 +788,7 @@ Resources:
       InstanceId: !Ref VMProd2
 
 # =========================================================
-# 6. OUTPUTS
+# 7. OUTPUTS
 # =========================================================
 Outputs:
   IPPrivadaVMBaseDeDatos:
@@ -733,3 +819,6 @@ Outputs:
     Description: "DNS interno del ALB de produccion"
     Value: !GetAtt ProductionALB.DNSName
 
+  ApiGatewayUrl:
+    Description: "URL pública del API Gateway (usar como base para el frontend, ej: VITE_API_CLIENTES_URL=<esto>)"
+    Value: !Sub "https://${ProductionApi}.execute-api.${AWS::Region}.amazonaws.com"
