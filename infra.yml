@@ -136,7 +136,7 @@ Resources:
   VpcLinkSecurityGroup:
     Type: "AWS::EC2::SecurityGroup"
     Properties:
-      GroupDescription: "SG para las ENIs del VPC Link de API Gateway (HTTP API -> ALB privado)"
+      GroupDescription: "SG para las ENIs del VPC Link de API Gateway (HTTP API hacia ALB privado)"
       VpcId: !Ref VpcId
       SecurityGroupEgress:
         - IpProtocol: "tcp"
