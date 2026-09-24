@@ -1,27 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: "Infraestructura Completa Proyecto Cloud - 4 VMs con IaC + ALB interno + API Gateway + Glue/Athena"
 
-# =========================================================
-# CAMBIOS RESPECTO DE LA VERSION ANTERIOR
-# =========================================================
-# 1. Un solo bucket de datos (lo que pide el enunciado), no tres.
-# 2. Nombre del bucket con sufijo de cuenta: los nombres de bucket son
-#    unicos en TODO AWS y "logistica-grupo-1-2026" ya existe en la cuenta
-#    de Joseph. Sin sufijo, el stack falla con BucketAlreadyExists.
-# 3. Crawlers apuntando a los prefijos reales dentro de ese unico bucket.
-# 4. Glue database renombrado a "logistica".
-# 5. tg-analytics al 8004 y tg-tracking al 8005 (estaban invertidos).
-# 6. Todos los health checks a "/" (los microservicios no exponen /health).
-# 7. Nombres de contenedor en espanol en los .env: ms-clientes,
-#    ms-vehiculos, ms-envios. ms-envios escucha en 8000, no en 3000.
-# 8. t3.micro en las 4 VMs (coincide con lo desplegado).
-# 9. Subnet explicita en VMDatabase (1c) y VMIngesta (1d).
-# 10. INTERVALO_INGESTA=86400: a 60 segundos se vuelcan las 3 bases
-#     enteras cada minuto y Athena cuenta todas las copias.
-# 11. Nombres de base de datos db_clientes / db_vehiculos / db_envios,
-#     que son los que aparecen como carpetas en S3.
-# 12. CORS en el API Gateway, que el frontend de Amplify necesita.
-
 Parameters:
   IngestaInstanceProfile:
     Type: String
