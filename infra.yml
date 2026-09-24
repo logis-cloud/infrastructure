@@ -1,5 +1,26 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Infraestructura Completa Proyecto Cloud - 4 VMs con IaC + API Gateway + Glue/Athena para svc-analytics"
+Description: "Infraestructura Completa Proyecto Cloud - 4 VMs con IaC + ALB interno + API Gateway + Glue/Athena"
+
+# =========================================================
+# CAMBIOS RESPECTO DE LA VERSION ANTERIOR
+# =========================================================
+# 1. Un solo bucket de datos (lo que pide el enunciado), no tres.
+# 2. Nombre del bucket con sufijo de cuenta: los nombres de bucket son
+#    unicos en TODO AWS y "logistica-grupo-1-2026" ya existe en la cuenta
+#    de Joseph. Sin sufijo, el stack falla con BucketAlreadyExists.
+# 3. Crawlers apuntando a los prefijos reales dentro de ese unico bucket.
+# 4. Glue database renombrado a "logistica".
+# 5. tg-analytics al 8004 y tg-tracking al 8005 (estaban invertidos).
+# 6. Todos los health checks a "/" (los microservicios no exponen /health).
+# 7. Nombres de contenedor en espanol en los .env: ms-clientes,
+#    ms-vehiculos, ms-envios. ms-envios escucha en 8000, no en 3000.
+# 8. t3.micro en las 4 VMs (coincide con lo desplegado).
+# 9. Subnet explicita en VMDatabase (1c) y VMIngesta (1d).
+# 10. INTERVALO_INGESTA=86400: a 60 segundos se vuelcan las 3 bases
+#     enteras cada minuto y Athena cuenta todas las copias.
+# 11. Nombres de base de datos db_clientes / db_vehiculos / db_envios,
+#     que son los que aparecen como carpetas en S3.
+# 12. CORS en el API Gateway, que el frontend de Amplify necesita.
 
 Parameters:
   IngestaInstanceProfile:
@@ -17,6 +38,12 @@ Parameters:
   VpcId:
     Type: "AWS::EC2::VPC::Id"
     Description: "VPC donde se crean los Security Groups (selecciona la VPC por defecto de tu cuenta/Learner Lab)"
+
+  NombreBucketDatos:
+    Type: String
+    Default: "logistica-grupo-1-2026"
+    Description: "Prefijo del bucket unico de ingesta. Se le agrega el AccountId automaticamente para que no choque con el bucket que ya existe en otra cuenta."
+
   Prod1SubnetId:
     Type: "AWS::EC2::Subnet::Id"
     Default: "subnet-0cc09d979bb259e78"
@@ -26,6 +53,15 @@ Parameters:
     Type: "AWS::EC2::Subnet::Id"
     Default: "subnet-0dbb6c9a39936a6ba"
     Description: "Subnet de VMProd2 (us-east-1a)"
+
+  DBSubnetId:
+    Type: "AWS::EC2::Subnet::Id"
+    Default: "subnet-0cc09d979bb259e78"
+    Description: "Subnet de la VM de base de datos (us-east-1c)"
+
+  IngestaSubnetId:
+    Type: "AWS::EC2::Subnet::Id"
+    Description: "Subnet de la VM de ingesta (us-east-1d). Completar con el id real de la subnet en esa zona."
 
   ALBSubnet1Id:
     Type: "AWS::EC2::Subnet::Id"
@@ -45,18 +81,18 @@ Resources:
   ALBSecurityGroup:
     Type: "AWS::EC2::SecurityGroup"
     Properties:
-      GroupDescription: "Acceso al ALB desde la VPC"
+      GroupDescription: "Acceso al ALB interno desde el VPC Link"
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: "tcp"
           FromPort: "80"
           ToPort: "80"
-          CidrIp: "0.0.0.0/0"
+          CidrIp: "172.31.0.0/16"
 
   ProdSecurityGroup:
     Type: "AWS::EC2::SecurityGroup"
     Properties:
-      GroupDescription: "Acceso a APIs de produccion desde el ALB y SSH"
+      GroupDescription: "Acceso a APIs de produccion SOLO desde el ALB, mas SSH"
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: "tcp"
@@ -130,9 +166,6 @@ Resources:
           ToPort: "27017"
           SourceSecurityGroupId: !Ref IngestionSecurityGroup
 
-  # Security group dedicado a las ENIs que crea el VPC Link de API Gateway.
-  # Necesita poder llegar al ALB por el puerto 80; no necesita ingress propio
-  # (nadie se conecta directo a estas ENIs), solo egress hacia el ALB.
   VpcLinkSecurityGroup:
     Type: "AWS::EC2::SecurityGroup"
     Properties:
@@ -144,9 +177,6 @@ Resources:
           ToPort: "80"
           DestinationSecurityGroupId: !Ref ALBSecurityGroup
 
-  # El ALB es "internal" (scheme privado), así que además de aceptar 80 desde
-  # 0.0.0.0/0 (regla ya existente en ALBSecurityGroup, útil solo dentro de la
-  # VPC) hace falta permitir explícitamente el tráfico que sale del VPC Link.
   ALBIngressFromVpcLink:
     Type: "AWS::EC2::SecurityGroupIngress"
     Properties:
@@ -157,10 +187,22 @@ Resources:
       SourceSecurityGroupId: !Ref VpcLinkSecurityGroup
 
   # =========================================================
-  # 2. MÁQUINAS VIRTUALES (INSTANCIAS EC2)
+  # 2. BUCKET UNICO DE INGESTA
+  # =========================================================
+  # El enunciado pide UN bucket S3 para los archivos de la ingesta. La
+  # separacion entre fuentes se hace por prefijo (ingesta/<db_name>/),
+  # no por bucket. El sufijo de AccountId evita el choque de nombres
+  # globales entre cuentas del grupo.
+  DatosBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub "${NombreBucketDatos}-${AWS::AccountId}"
+
+  # =========================================================
+  # 3. MAQUINAS VIRTUALES (INSTANCIAS EC2)
   # =========================================================
 
-  # --- VM 1: BASE DE DATOS ---
+  # --- VM 1: BASE DE DATOS (us-east-1c) ---
   VMDatabase:
     Type: "AWS::EC2::Instance"
     Properties:
@@ -168,10 +210,9 @@ Resources:
         - Key: "Name"
           Value: "VM-BaseDeDatos"
       ImageId: !Ref AMI
-      # t2.micro (1 GB RAM) no alcanza para correr MySQL + Postgres + Mongo
-      # a la vez, menos aun cuando se les carga con los scripts de fake data.
-      InstanceType: "t3.small"
+      InstanceType: "t3.micro"
       KeyName: !Ref KeyName
+      SubnetId: !Ref DBSubnetId
       SecurityGroupIds:
         - !Ref DBSecurityGroup
       BlockDeviceMappings:
@@ -183,10 +224,8 @@ Resources:
           #!/bin/bash
           cd /home/ubuntu
 
-          # La AMI trae MySQL nativo preinstalado, corriendo en el puerto 3306.
-          # Choca directo con el contenedor mysql-clients del compose. Se
-          # deshabilita ANTES de levantar los contenedores para que no vuelva
-          # a arrancar en un reinicio de la VM.
+          # La AMI trae MySQL nativo preinstalado en el 3306 y choca con el
+          # contenedor. Se deshabilita antes de levantar el compose.
           systemctl stop mysql || true
           systemctl disable mysql || true
 
@@ -194,18 +233,16 @@ Resources:
           cd vm-db
           docker compose up -d
 
-          # Dependencias para correr manualmente los scripts de fake data
-          # (clients/fake_mysql.py, vehicles/fake_postgres.py). Se instalan
-          # aca, pero los scripts NO se ejecutan automaticamente: hay que
-          # esperar a que las tablas existan (init de MySQL/Postgres) y
-          # correrlos a mano una sola vez.
+          # Dependencias para los scripts de fake data. Los scripts NO se
+          # ejecutan solos: hay que esperar a que las tablas existan y
+          # correrlos a mano una unica vez.
           apt-get update -y
           apt-get install -y python3-pip
           pip3 install pymysql psycopg2-binary faker pymongo
 
           chown -R ubuntu:ubuntu /home/ubuntu
 
-  # --- VM 2: PRODUCCIÓN 1 ---
+  # --- VM 2: PRODUCCION 1 (us-east-1c) ---
   VMProd1:
     Type: "AWS::EC2::Instance"
     DependsOn: VMDatabase
@@ -214,7 +251,7 @@ Resources:
         - Key: "Name"
           Value: "VM-Produccion-1"
       ImageId: !Ref AMI
-      InstanceType: "t2.micro"
+      InstanceType: "t3.micro"
       KeyName: !Ref KeyName
       SubnetId: !Ref Prod1SubnetId
       IamInstanceProfile: !Ref IngestaInstanceProfile
@@ -229,59 +266,57 @@ Resources:
           #!/bin/bash
           cd /home/ubuntu
 
-          # Repositorio con el docker-compose.yml de nivel superior que
-          # levanta los microservicios juntos.
-          git clone https://github.com/logis-cloud/vm-prod.git 
-          cd vm-prod 
+          git clone https://github.com/logis-cloud/vm-prod.git
+          cd vm-prod
 
-          # Clona cada microservicio como subcarpeta dentro del stack.
           git clone https://github.com/logis-cloud/svc-clients.git
           git clone https://github.com/logis-cloud/svc-vehicles.git
           git clone https://github.com/logis-cloud/svc-shipments.git
           git clone https://github.com/logis-cloud/svc-tracking.git
           git clone https://github.com/logis-cloud/svc-analytics.git
 
-          # Genera el .env de cada microservicio con la IP PRIVADA REAL
-          # de la VM de base de datos, resuelta por CloudFormation.
           cat > svc-clients/.env <<EOF
           DB_USER=root
           DB_PASSWORD=root123
           DB_HOST=${VMDatabase.PrivateIp}
           DB_PORT=3306
-          DB_NAME=clients_db
+          DB_NAME=db_clientes
           CORS_ALLOWED_ORIGINS=*
           EOF
 
           cat > svc-vehicles/.env <<EOF
           DB_HOST=${VMDatabase.PrivateIp}
           DB_PORT=5432
-          DB_NAME=vehicles_db
+          DB_NAME=db_vehiculos
           DB_USER=postgres
           DB_PASSWORD=postgres123
           CORS_ALLOWED_ORIGINS=*
           EOF
 
-
+          # ms-envios escucha en 8000 dentro del contenedor (verificado con
+          # docker ps: 8003->8000), no en 3000.
           cat > svc-shipments/.env <<EOF
-          PORT=3000
-          MONGODB_URI=mongodb://root:root123@${VMDatabase.PrivateIp}:27017/shipments_db?authSource=admin
-          CLIENTES_SERVICE_URL=http://ms-clients:8000
-          VEHICULOS_SERVICE_URL=http://ms-vehicles:8080
+          PORT=8000
+          MONGODB_URI=mongodb://root:root123@${VMDatabase.PrivateIp}:27017/db_envios?authSource=admin
+          CLIENTES_SERVICE_URL=http://ms-clientes:8000
+          VEHICULOS_SERVICE_URL=http://ms-vehiculos:8080
           TOPE_ENVIOS_POR_PAR_POR_DIA=15
           ASSIGNMENT_TZ_OFFSET_HOURS=-5
           CORS_ALLOWED_ORIGINS=*
           EOF
 
+          # Los contenedores se llaman en espanol. Con ms-clients o
+          # ms-shipments, tracking levanta pero no resuelve a ninguno.
           cat > svc-tracking/.env <<EOF
-          CLIENTES_SERVICE_URL=http://ms-clients:8000
-          ENVIOS_SERVICE_URL=http://ms-shipments:3000
-          VEHICULOS_SERVICE_URL=http://ms-vehicles:8080
+          CLIENTES_SERVICE_URL=http://ms-clientes:8000
+          ENVIOS_SERVICE_URL=http://ms-envios:8000
+          VEHICULOS_SERVICE_URL=http://ms-vehiculos:8080
           CORS_ALLOWED_ORIGINS=*
           EOF
 
           cat > svc-analytics/.env <<EOF
           AWS_REGION=us-east-1
-          DATABASE_GLUE=logis_analytics
+          DATABASE_GLUE=logistica
           ATHENA_WORKGROUP=logis-analytics-wg
           S3_STAGING_DIR=s3://logis-athena-results-${AWS::AccountId}/results/
           EOF
@@ -290,7 +325,7 @@ Resources:
 
           chown -R ubuntu:ubuntu /home/ubuntu
 
-  # --- VM 3: PRODUCCIÓN 2 ---
+  # --- VM 3: PRODUCCION 2 (us-east-1a) ---
   VMProd2:
     Type: "AWS::EC2::Instance"
     DependsOn: VMDatabase
@@ -299,7 +334,7 @@ Resources:
         - Key: "Name"
           Value: "VM-Produccion-2"
       ImageId: !Ref AMI
-      InstanceType: "t2.micro"
+      InstanceType: "t3.micro"
       KeyName: !Ref KeyName
       SubnetId: !Ref Prod2SubnetId
       IamInstanceProfile: !Ref IngestaInstanceProfile
@@ -314,8 +349,8 @@ Resources:
           #!/bin/bash
           cd /home/ubuntu
 
-          git clone https://github.com/logis-cloud/vm-prod.git 
-          cd vm-prod 
+          git clone https://github.com/logis-cloud/vm-prod.git
+          cd vm-prod
 
           git clone https://github.com/logis-cloud/svc-clients.git
           git clone https://github.com/logis-cloud/svc-vehicles.git
@@ -328,39 +363,39 @@ Resources:
           DB_PASSWORD=root123
           DB_HOST=${VMDatabase.PrivateIp}
           DB_PORT=3306
-          DB_NAME=clients_db
+          DB_NAME=db_clientes
           CORS_ALLOWED_ORIGINS=*
           EOF
 
           cat > svc-vehicles/.env <<EOF
           DB_HOST=${VMDatabase.PrivateIp}
           DB_PORT=5432
-          DB_NAME=vehicles_db
+          DB_NAME=db_vehiculos
           DB_USER=postgres
           DB_PASSWORD=postgres123
           CORS_ALLOWED_ORIGINS=*
           EOF
 
           cat > svc-shipments/.env <<EOF
-          PORT=3000
-          MONGODB_URI=mongodb://root:root123@${VMDatabase.PrivateIp}:27017/shipments_db?authSource=admin
-          CLIENTES_SERVICE_URL=http://ms-clients:8000
-          VEHICULOS_SERVICE_URL=http://ms-vehicles:8080
+          PORT=8000
+          MONGODB_URI=mongodb://root:root123@${VMDatabase.PrivateIp}:27017/db_envios?authSource=admin
+          CLIENTES_SERVICE_URL=http://ms-clientes:8000
+          VEHICULOS_SERVICE_URL=http://ms-vehiculos:8080
           TOPE_ENVIOS_POR_PAR_POR_DIA=15
           ASSIGNMENT_TZ_OFFSET_HOURS=-5
           CORS_ALLOWED_ORIGINS=*
           EOF
 
           cat > svc-tracking/.env <<EOF
-          CLIENTES_SERVICE_URL=http://ms-clients:8000
-          ENVIOS_SERVICE_URL=http://ms-shipments:3000
-          VEHICULOS_SERVICE_URL=http://ms-vehicles:8080
+          CLIENTES_SERVICE_URL=http://ms-clientes:8000
+          ENVIOS_SERVICE_URL=http://ms-envios:8000
+          VEHICULOS_SERVICE_URL=http://ms-vehiculos:8080
           CORS_ALLOWED_ORIGINS=*
           EOF
 
           cat > svc-analytics/.env <<EOF
           AWS_REGION=us-east-1
-          DATABASE_GLUE=logis_analytics
+          DATABASE_GLUE=logistica
           ATHENA_WORKGROUP=logis-analytics-wg
           S3_STAGING_DIR=s3://logis-athena-results-${AWS::AccountId}/results/
           EOF
@@ -369,7 +404,7 @@ Resources:
 
           chown -R ubuntu:ubuntu /home/ubuntu
 
-  # --- VM 4: INGESTA (Data Science) ---
+  # --- VM 4: INGESTA (us-east-1d) ---
   VMIngesta:
     Type: "AWS::EC2::Instance"
     DependsOn: VMDatabase
@@ -378,8 +413,9 @@ Resources:
         - Key: "Name"
           Value: "VM-Ingesta-DS"
       ImageId: !Ref AMI
-      InstanceType: "t2.micro"
+      InstanceType: "t3.micro"
       KeyName: !Ref KeyName
+      SubnetId: !Ref IngestaSubnetId
       IamInstanceProfile: !Ref IngestaInstanceProfile
       SecurityGroupIds:
         - !Ref IngestionSecurityGroup
@@ -392,22 +428,23 @@ Resources:
           #!/bin/bash
           cd /home/ubuntu
 
-          # VM de Ingesta: no corre bases de datos, solo lee por IP privada
-          # desde VMDatabase y escribe a S3. Las credenciales de S3 vienen
-          # del instance profile (IamInstanceProfile arriba), no de un
-          # archivo de credenciales manual.
+          # Solo lee por IP privada desde VMDatabase y escribe a S3. Las
+          # credenciales de S3 vienen del instance profile, no de un archivo.
           git clone https://github.com/logis-cloud/vm-ingesta.git
           cd vm-ingesta
 
+          # Los 3 contenedores escriben al MISMO bucket, separados por
+          # prefijo. INTERVALO_INGESTA=86400 (1 vez al dia): con 60 seg se
+          # vuelca todo cada minuto y Athena cuenta las copias repetidas.
           cat > ingesta-clientes/.env <<EOF
           DB_HOST=${VMDatabase.PrivateIp}
           DB_PORT=3306
           DB_USER=root
           DB_PASSWORD=root123
-          DB_NAME=clients_db
-          S3_BUCKET_NAME=logis-clientes
+          DB_NAME=db_clientes
+          S3_BUCKET_NAME=${DatosBucket}
           AWS_REGION=us-east-1
-          INTERVALO_INGESTA=60
+          INTERVALO_INGESTA=86400
           RETRY_INGESTA=10
           EOF
 
@@ -416,40 +453,32 @@ Resources:
           DB_PORT=5432
           DB_USER=postgres
           DB_PASSWORD=postgres123
-          DB_NAME=vehicles_db
-          S3_BUCKET_NAME=logis-vehiculos
+          DB_NAME=db_vehiculos
+          S3_BUCKET_NAME=${DatosBucket}
           AWS_REGION=us-east-1
-          INTERVALO_INGESTA=60
+          INTERVALO_INGESTA=86400
           RETRY_INGESTA=10
           EOF
 
           cat > ingesta-envios/.env <<EOF
-          MONGO_URI=mongodb://root:root123@${VMDatabase.PrivateIp}:27017/shipments_db?authSource=admin
-          DB_NAME=shipments_db
-          S3_BUCKET_NAME=logis-envios
+          MONGO_URI=mongodb://root:root123@${VMDatabase.PrivateIp}:27017/db_envios?authSource=admin
+          DB_NAME=db_envios
+          S3_BUCKET_NAME=${DatosBucket}
           AWS_REGION=us-east-1
-          INTERVALO_INGESTA=60
+          INTERVALO_INGESTA=86400
           RETRY_INGESTA=10
           EOF
-
-          # --- Fallback manual: solo si LabInstanceProfile no existe con ---
-          # --- ese nombre en tu cuenta. Descomenta y reemplaza los 3     ---
-          # --- placeholders con las credenciales temporales del Lab.    ---
-          # mkdir -p /home/ubuntu/.aws
-          # cat > /home/ubuntu/.aws/credentials <<EOF
-          # [default]
-          # aws_access_key_id=PLACEHOLDER_ACCESS_KEY_ID
-          # aws_secret_access_key=PLACEHOLDER_SECRET_ACCESS_KEY
-          # aws_session_token=PLACEHOLDER_SESSION_TOKEN
-          # EOF
 
           docker compose up -d --build
 
           chown -R ubuntu:ubuntu /home/ubuntu
 
   # =========================================================
-  # 3. APPLICATION LOAD BALANCER
+  # 4. APPLICATION LOAD BALANCER (INTERNO)
   # =========================================================
+  # Un unico listener en :80. El reparto se decide por la RUTA del URL,
+  # no por el puerto. Asi el gateway expone una sola direccion y agregar
+  # un microservicio es agregar una regla, no una puerta nueva.
   ProductionALB:
     Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
     Properties:
@@ -465,6 +494,9 @@ Resources:
         - Key: "Name"
           Value: "logis-production-alb"
 
+  # Todos los health checks apuntan a "/" porque es la unica ruta que los
+  # cinco microservicios exponen. Con /health los destinos quedan
+  # unhealthy y el ALB devuelve 503 aunque los contenedores esten bien.
   ClientsTargetGroup:
     Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
     Properties:
@@ -491,7 +523,7 @@ Resources:
       Protocol: HTTP
       TargetType: instance
       VpcId: !Ref VpcId
-      HealthCheckPath: "/health"
+      HealthCheckPath: "/"
       HealthCheckProtocol: HTTP
       Matcher:
         HttpCode: "200"
@@ -509,7 +541,7 @@ Resources:
       Protocol: HTTP
       TargetType: instance
       VpcId: !Ref VpcId
-      HealthCheckPath: "/health"
+      HealthCheckPath: "/"
       HealthCheckProtocol: HTTP
       Matcher:
         HttpCode: "200"
@@ -519,10 +551,11 @@ Resources:
         - Id: !Ref VMProd2
           Port: 8003
 
-  TrackingTargetGroup:
+  # ms-analitica corre en el 8004 (verificado con docker ps).
+  AnalyticsTargetGroup:
     Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
     Properties:
-      Name: "tg-tracking"
+      Name: "tg-analytics"
       Port: 8004
       Protocol: HTTP
       TargetType: instance
@@ -537,15 +570,16 @@ Resources:
         - Id: !Ref VMProd2
           Port: 8004
 
-  AnalyticsTargetGroup:
+  # ms-tracking es el que ocupa el 8005.
+  TrackingTargetGroup:
     Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
     Properties:
-      Name: "tg-analytics"
+      Name: "tg-tracking"
       Port: 8005
       Protocol: HTTP
       TargetType: instance
       VpcId: !Ref VpcId
-      HealthCheckPath: "/health"
+      HealthCheckPath: "/"
       HealthCheckProtocol: HTTP
       Matcher:
         HttpCode: "200"
@@ -576,7 +610,7 @@ Resources:
       Conditions:
         - Field: path-pattern
           PathPatternConfig:
-            Values: ["/", "/clientes", "/clientes/*", "/direcciones/*"]
+            Values: ["/", "/clientes", "/clientes/*", "/direcciones", "/direcciones/*"]
       Actions:
         - Type: forward
           TargetGroupArn: !Ref ClientsTargetGroup
@@ -607,24 +641,11 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref ShipmentsTargetGroup
 
-  TrackingALBRule:
-    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
-    Properties:
-      ListenerArn: !Ref ProductionALBListener
-      Priority: 40
-      Conditions:
-        - Field: path-pattern
-          PathPatternConfig:
-            Values: ["/trackings", "/trackings/*"]
-      Actions:
-        - Type: forward
-          TargetGroupArn: !Ref TrackingTargetGroup
-
   AnalyticsALBRule:
     Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
     Properties:
       ListenerArn: !Ref ProductionALBListener
-      Priority: 50
+      Priority: 40
       Conditions:
         - Field: path-pattern
           PathPatternConfig:
@@ -633,10 +654,22 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref AnalyticsTargetGroup
 
+  TrackingALBRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      ListenerArn: !Ref ProductionALBListener
+      Priority: 50
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ["/trackings", "/trackings/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TrackingTargetGroup
+
   # =========================================================
-  # 4. API GATEWAY (HTTP API) + VPC LINK
+  # 5. API GATEWAY (HTTP API) + VPC LINK
   # =========================================================
-  # Réplica en IaC de lo que se configuró a mano en la consola:
   # Internet -> API Gateway (ANY /{proxy+}) -> VPC Link -> ALB privado :80
   # -> ListenerRules -> Target Groups -> microservicios.
 
@@ -645,7 +678,11 @@ Resources:
     Properties:
       Name: "logis-api"
       ProtocolType: HTTP
-      Description: "Punto de entrada público único hacia el ALB interno de los microservicios"
+      Description: "Punto de entrada publico unico hacia el ALB interno de los microservicios"
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+        AllowHeaders: ["*"]
 
   ProductionVpcLink:
     Type: "AWS::ApiGatewayV2::VpcLink"
@@ -668,9 +705,8 @@ Resources:
       IntegrationUri: !Ref ProductionALBListener
       PayloadFormatVersion: "1.0"
 
-  # Ruta greedy: {proxy+} captura el path completo (uno o más segmentos),
-  # necesario para que /clientes/1, /clientes/1/direcciones/2, etc. lleguen
-  # intactos hasta el ALB. Sin el "+" solo se captura un segmento.
+  # {proxy+} captura el path completo, necesario para que /clientes/1 o
+  # /clientes/1/direcciones/2 lleguen intactos al ALB.
   ProductionApiRoute:
     Type: "AWS::ApiGatewayV2::Route"
     Properties:
@@ -678,7 +714,7 @@ Resources:
       RouteKey: "ANY /{proxy+}"
       Target: !Sub "integrations/${ProductionApiIntegration}"
 
-  # Ruta explícita para la raíz ("/"), ya que {proxy+} no matchea "/" solo.
+  # Ruta explicita para la raiz: {proxy+} no matchea "/" solo.
   ProductionApiRootRoute:
     Type: "AWS::ApiGatewayV2::Route"
     Properties:
@@ -694,26 +730,20 @@ Resources:
       AutoDeploy: true
 
   # =========================================================
-  # 5. GLUE + ATHENA (para svc-analytics)
+  # 6. GLUE + ATHENA
   # =========================================================
-  # Database compartido: los 3 buckets (logis-clientes, logis-vehiculos,
-  # logis-envios) catalogan sus tablas acá, no cada uno en su propio
-  # database, para que los JOINs entre ellos funcionen en Athena
-  # (ej. envios JOIN clientes ON clienteid = id).
   GlueDatabase:
     Type: "AWS::Glue::Database"
     Properties:
       CatalogId: !Ref "AWS::AccountId"
       DatabaseInput:
-        Name: "logis_analytics"
-        Description: "Catálogo unificado (clientes, vehiculos, envios) para Athena"
+        Name: "logistica"
+        Description: "Catalogo unificado (clientes, vehiculos, envios) para Athena"
 
-  # Los 3 Crawlers usan LabRole por ARN (mismo role detrás de
-  # LabInstanceProfile) porque en Learner Lab no se pueden crear roles
-  # IAM nuevos. Apuntan cada uno al prefijo EXACTO donde la ingesta deja
-  # los CSVs (ingesta/<db_name>/), no a la raíz del bucket — apuntar a la
-  # raíz es la causa más común de que el Crawler "corra bien" pero no
-  # encuentre datos.
+  # Los 3 crawlers apuntan al prefijo EXACTO dentro del bucket unico. Cada
+  # subcarpeta de ultimo nivel se convierte en una tabla del catalogo, que
+  # es lo que permite los JOINs. Apuntar a la raiz del bucket es la causa
+  # mas comun de que un crawler "corra bien" y no encuentre nada.
   CrawlerClientes:
     Type: "AWS::Glue::Crawler"
     Properties:
@@ -722,7 +752,7 @@ Resources:
       DatabaseName: !Ref GlueDatabase
       Targets:
         S3Targets:
-          - Path: "s3://logis-clientes/ingesta/clients_db/"
+          - Path: !Sub "s3://${DatosBucket}/ingesta/db_clientes/"
       SchemaChangePolicy:
         UpdateBehavior: "UPDATE_IN_DATABASE"
         DeleteBehavior: "LOG"
@@ -735,7 +765,7 @@ Resources:
       DatabaseName: !Ref GlueDatabase
       Targets:
         S3Targets:
-          - Path: "s3://logis-vehiculos/ingesta/vehicles_db/"
+          - Path: !Sub "s3://${DatosBucket}/ingesta/db_vehiculos/"
       SchemaChangePolicy:
         UpdateBehavior: "UPDATE_IN_DATABASE"
         DeleteBehavior: "LOG"
@@ -748,21 +778,16 @@ Resources:
       DatabaseName: !Ref GlueDatabase
       Targets:
         S3Targets:
-          - Path: "s3://logis-envios/ingesta/shipments_db/"
+          - Path: !Sub "s3://${DatosBucket}/ingesta/db_envios/"
       SchemaChangePolicy:
         UpdateBehavior: "UPDATE_IN_DATABASE"
         DeleteBehavior: "LOG"
 
-  # Bucket de resultados de Athena. Nombre con AccountId para que sea
-  # único a nivel global (choca si dos alumnos usan el mismo nombre corto).
   AthenaResultsBucket:
     Type: "AWS::S3::Bucket"
     Properties:
       BucketName: !Sub "logis-athena-results-${AWS::AccountId}"
 
-  # EnforceWorkGroupConfiguration=true fuerza a que cualquier query
-  # (consola o svc-analytics vía boto3) use este OutputLocation, sin que
-  # cada llamada tenga que especificarlo.
   AthenaWorkgroup:
     Type: "AWS::Athena::WorkGroup"
     Properties:
@@ -774,9 +799,9 @@ Resources:
         EnforceWorkGroupConfiguration: true
         PublishCloudWatchMetricsEnabled: false
 
-# =========================================================
-# 6. IPS ELÁSTICAS (Para Producción)
-# =========================================================
+  # =========================================================
+  # 7. IPS ELASTICAS (Para Produccion)
+  # =========================================================
   EIPProd1:
     Type: "AWS::EC2::EIP"
     Properties:
@@ -788,7 +813,7 @@ Resources:
       InstanceId: !Ref VMProd2
 
 # =========================================================
-# 7. OUTPUTS
+# 8. OUTPUTS
 # =========================================================
 Outputs:
   IPPrivadaVMBaseDeDatos:
@@ -803,12 +828,16 @@ Outputs:
     Description: "IP Publica Elastica para Produccion 2"
     Value: !Ref EIPProd2
 
+  BucketDatos:
+    Description: "Bucket unico donde la ingesta deja los CSV (usar este nombre en el diagrama)"
+    Value: !Ref DatosBucket
+
   GlueDatabaseName:
-    Description: "Nombre del Glue Database para Athena (usar en svc-analytics)"
+    Description: "Nombre del Glue Database para Athena"
     Value: !Ref GlueDatabase
 
   AthenaWorkgroupName:
-    Description: "Workgroup a usar desde svc-analytics (boto3 athena client)"
+    Description: "Workgroup a usar desde svc-analytics"
     Value: !Ref AthenaWorkgroup
 
   AthenaResultsBucketName:
@@ -820,5 +849,6 @@ Outputs:
     Value: !GetAtt ProductionALB.DNSName
 
   ApiGatewayUrl:
-    Description: "URL pública del API Gateway (usar como base para el frontend, ej: VITE_API_CLIENTES_URL=<esto>)"
+    Description: "URL publica del API Gateway (base para el frontend)"
     Value: !Sub "https://${ProductionApi}.execute-api.${AWS::Region}.amazonaws.com"
+
